@@ -1,0 +1,26 @@
+# The hardware a node in a GPU pool has. Civo GPU sizes are region-gated;
+# `civo kubernetes size` lists what your account offers.
+apiVersion: modelplane.ai/v1alpha1
+kind: InferenceClass
+metadata:
+  name: l40s-1x
+spec:
+  description: "Civo an.g1.l40s.kube.x1, 1x NVIDIA L40S 48GB"
+  provisioning:
+    provider: Civo
+    civo:
+      size: an.g1.l40s.kube.x1
+      accelerator:
+        type: nvidia-l40s
+        count: 1
+  devices:
+  - name: gpu
+    claim: DRA
+    driver: gpu.nvidia.com
+    deviceClassName: gpu.nvidia.com
+    count: 1
+    attributes:
+      architecture: { string: Ada Lovelace }
+      cudaComputeCapability: { version: "8.9.0" }
+    capacity:
+      memory: { value: "46068Mi" }   # what an L40S reports, not the nominal 48GB

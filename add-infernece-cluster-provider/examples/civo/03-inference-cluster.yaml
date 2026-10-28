@@ -1,0 +1,18 @@
+# A Civo cluster with one fixed-size L40S pool. Modelplane adds the system
+# pool, the network and the firewall. Civo has no RWX storage, so this
+# cluster runs no ModelCache: engines pull weights from the model source.
+apiVersion: modelplane.ai/v1alpha1
+kind: InferenceCluster
+metadata:
+  name: civo-nyc1
+  labels:
+    modelplane.ai/region: nyc1
+spec:
+  cluster:
+    source: Civo
+    civo:
+      region: NYC1
+  nodePools:
+  - name: gpu-l40s
+    className: l40s-1x
+    nodeCount: 1

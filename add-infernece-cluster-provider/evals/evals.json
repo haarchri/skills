@@ -1,0 +1,114 @@
+{
+  "skill_name": "add-inference-cluster-provider",
+  "notes": "Run from a fresh Modelplane checkout at main. Evals 1-3 are plan-only and cheap; they test that the skill's decision tree is applied to the facts given. Eval 4 is a full implementation, graded by check_provider_change.py plus nix flake check; run it on a branch or worktree, never against main. Evals 5-6 test triggering. The provider in evals 1-4 is fictional on purpose, so the expected answers follow from the stated facts and not from what the model remembers about a real cloud.",
+  "evals": [
+    {
+      "id": 1,
+      "name": "plan-no-rwx-no-fabric",
+      "prompt": "Plan (don't write code yet) adding Lumen Cloud as a provisioned InferenceCluster provider in Modelplane. Issue #612. Facts: Crossplane provider xpkg.upbound.io/upbound/provider-lumen:v0.3.0. Managed resources: Network, Cluster, NodePool (NodePool needs the cluster's observed ID). The cluster connection secret holds a kubeconfig with client certificates. GPU node images ship the NVIDIA driver; no GPU operator add-on. No server-side autoscaler. Only ReadWriteOnce block storage. No InfiniBand. Newest Kubernetes: 1.35.",
+      "expected_output": "A phased plan: dependency commit with nix run .#build, LumenCluster XR and compose-lumen-cluster, wiring, docs. ModelCache left out with the reason stated in docs. Node pools gated on cluster Ready with _dependents_observed. In-cluster cluster-autoscaler. Hand-written serving-stack half shaped like Nebius (NFD + DRA driver). Credentials block on the InferenceCluster lumen block.",
+      "files": [],
+      "assertions": [
+        "The plan starts with adding provider-lumen to crossplane-project.yaml and regenerating schemas with nix run .#build, as its own commit",
+        "The plan does not add status.cache, a StorageClass, a CSI driver, Longhorn, or any other RWX substitute",
+        "The plan adds Lumen to the 'absent' list in cache_storage_class() and to the ModelCache 'none' bullet in inference-cluster.md, with the reason (RWO only)",
+        "The plan gates node pools on the cluster being Ready and keeps them once observed (_dependents_observed or equivalent)",
+        "The plan composes the upstream cluster-autoscaler as an orphan-managed Helm release on the workload cluster",
+        "The plan's serving-stack half installs NFD and the DRA driver and does not install the GPU operator driver",
+        "The plan adds a credentials block to spec.cluster.lumen on InferenceCluster",
+        "The plan adds no fabric field and says fabric is not mapped",
+        "The plan defaults kubernetesVersion to 1.35",
+        "Planned commit subjects are imperative with no feat:/fix: prefix, and the PR description starts with 'Fixes #612.'"
+      ]
+    },
+    {
+      "id": 2,
+      "name": "plan-with-rwx-and-fabric",
+      "prompt": "Plan (no code) adding Lumen Cloud as a provisioned InferenceCluster provider in Modelplane. Issue #613. Facts: provider xpkg.upbound.io/upbound/provider-lumen:v0.3.0. Managed resources: Network, Subnet, Cluster, NodePool, FileShare; all children can reference their parent by selector. The connection secret has only the endpoint and CA; clients authenticate with a Lumen service account token. Lumen offers a managed GPU Operator add-on. Node pools autoscale server-side. FileShare is a managed NFS share mountable read-write from many nodes, with a CSI driver bundled in the cluster. GPU pools can be placed on one InfiniBand fabric.",
+      "expected_output": "Plan that composes everything in one pass using selectors, composes the modelplane-rwx-fs StorageClass and publishes status.cache, maps the cloud in cache_storage_class, layers an identity on the ClusterProviderConfig, gates readiness on an observe-only GPU validator Object and disables the operator's device plugin on GPU pools, maps fabric, and uses server-side autoscaling with no in-cluster autoscaler.",
+      "files": [],
+      "assertions": [
+        "The plan composes the FileShare and a modelplane-rwx-fs StorageClass, and publishes status.cache.storageClassName",
+        "The plan adds the cloud to the provisioned map in cache_storage_class() and to _observed_cluster_cache_class()",
+        "The plan composes children in one pass using selectors instead of gating them on cluster Ready",
+        "The plan layers a service-account identity on the ClusterProviderConfig, like GKE or Nebius",
+        "The plan does not install a second NFD and labels GPU pools nvidia.com/gpu.deploy.device-plugin=false",
+        "The plan gates cluster readiness on an observe-only Object watching the GPU operator's validator",
+        "The plan maps InfiniBand fabric for GPU pools",
+        "The plan uses the pool's server-side autoscaling fields and composes no cluster-autoscaler Helm release"
+      ]
+    },
+    {
+      "id": 7,
+      "name": "plan-serving-stack-shape",
+      "prompt": "For a new Modelplane provider, Lumen Cloud: GPU node images ship no NVIDIA driver but do ship the container toolkit, and Lumen offers no GPU operator add-on. Lumen is not an AICR service. Describe exactly what the serving-stack cloud half for Lumen contains and which files change. No code.",
+      "expected_output": "A hand-written stacks/clouds/lumen.py with cert-manager, kube-prometheus-stack, NFD (tolerating the GPU taint), gpu-operator (driver on, toolkit off, device plugin off, nfd off, wait) and the DRA driver at /run/nvidia/driver depending on gpu-operator; registration in __init__ and the Cloud Literal; ServingStack enum; no GPU readiness gate in the cluster function; key-set test cases.",
+      "files": [],
+      "assertions": [
+        "The half is hand-written in stacks/clouds/lumen.py; generated/aicr and common.py are not edited",
+        "gpu-operator is included with the driver enabled, toolkit disabled and device plugin disabled",
+        "nvidia-dra-driver-gpu sets nvidiaDriverRoot to /run/nvidia/driver and depends on gpu-operator",
+        "NFD is included and its worker tolerates nvidia.com/gpu",
+        "The cluster function composes no GPU readiness gate, with the deadlock reason",
+        "Release names keep the mp-<chart> form, and the plan mentions LumenStandard/LumenDynamo key-set cases",
+        "The plan enables the operator's DCGM exporter with the shared DCGM_METRICS_CSV and its ServiceMonitor off, or states that GPU metrics will be empty",
+        "The plan adds an e2e leg for Lumen in e2e/clouds/__init__.py, e2e/test_legs.py and the e2e-clouds matrix"
+      ]
+    },
+    {
+      "id": 3,
+      "name": "missing-facts-asks",
+      "prompt": "Add Lumen Cloud as an inference cluster provider in Modelplane.",
+      "expected_output": "The agent does not start writing code. It researches what it can, then asks for the facts it can't determine (issue number, provider package and version, RWX storage, GPU stack, autoscaling, credentials model) or, if unattended, states assumptions explicitly before proceeding.",
+      "files": [],
+      "assertions": [
+        "The agent asks for, or explicitly flags as unknown, the issue number",
+        "The agent asks for, or explicitly flags as unknown, whether Lumen has managed RWX storage usable on GPU nodes",
+        "The agent asks for, or explicitly flags as unknown, the Crossplane provider package and version",
+        "The agent does not edit apis/ or functions/ before those facts are settled"
+      ]
+    },
+    {
+      "id": 4,
+      "name": "full-implementation-civo-replay",
+      "prompt": "On a branch from commit 3975e78^ (before Civo support), add Civo as a provisioned InferenceCluster provider in Modelplane. Issue #291. Facts: xpkg.upbound.io/upbound/provider-civo:v1.0.0. Resources: Network, Firewall, Cluster (system pool inline), NodePool (needs the cluster ID). The kubeconfig has client certificates. Civo GPU images ship the container toolkit but no driver and there is no GPU operator add-on. No server-side autoscaler; Civo provisions a civo-api-access Secret in kube-system that the upstream cluster-autoscaler can use. Only ReadWriteOnce storage. No fabric. Don't run anything against a real cloud.",
+      "expected_output": "A branch that passes nix flake check and the structural grader, replaying #475 without its review findings: no cni or apiKeySecretRef fields, no shortNames, civo-api-access referenced not copied, commits without type prefixes.",
+      "files": [],
+      "assertions": [
+        "python3 evals/check_provider_change.py --repo . --base 3975e78^ --head HEAD --cloud civo --cache no exits 0",
+        "nix flake check exits 0 (its own exit code, not a pipe's)",
+        "The CivoCluster XRD has no cni and no apiKeySecretRef field",
+        "compose-civo-cluster composes no Secret or Object copying the Civo API key into the workload cluster",
+        "The serving-stack Civo half installs gpu-operator with driver enabled and toolkit and device plugin disabled",
+        "compose-civo-cluster composes no GPU readiness gate",
+        "The final report names the layer reached and does not claim a real-cloud validation",
+        "examples/civo/ exists at the repo root with 00-credentials.sh, numbered manifests, test.sh, teardown.sh and README.md, and no API key in any file",
+        "The Modelplane manifests in examples/civo/ validate against the generated models",
+        "docs/manifests/getting-started/civo/model-deployment.yaml exists and deploying-a-model.md has a Civo tab",
+        "The serving-stack Civo half sets nvidiaDriverRoot to /run/nvidia/driver and makes the DRA driver depend on gpu-operator",
+        "The NFD worker tolerates the nvidia.com/gpu taint",
+        "A civo leg exists in e2e/clouds/__init__.py and test_legs.py, and nix run .#e2e -- --cloud civo passes"
+      ]
+    },
+    {
+      "id": 5,
+      "name": "should-trigger-phrasing",
+      "prompt": "can we support provisioning clusters on Scaleway Kapsule in modelplane?",
+      "expected_output": "The skill triggers.",
+      "files": [],
+      "assertions": [
+        "The add-inference-cluster-provider skill is loaded"
+      ]
+    },
+    {
+      "id": 6,
+      "name": "should-not-trigger",
+      "prompt": "Bump the cluster-autoscaler chart in compose-eks-cluster to 9.58.0.",
+      "expected_output": "The skill does not trigger; this changes an existing provider.",
+      "files": [],
+      "assertions": [
+        "The add-inference-cluster-provider skill is not loaded"
+      ]
+    }
+  ]
+}

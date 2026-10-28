@@ -1,0 +1,15 @@
+# Points the Civo provider at the Secret 00-credentials.sh created. Named
+# default, so an InferenceCluster with source Civo uses it without naming it.
+# The key only provisions clusters: Civo kubeconfigs embed client
+# certificates, so nothing needs it to reach the clusters afterwards.
+apiVersion: civo.m.upbound.io/v1beta1
+kind: ClusterProviderConfig
+metadata:
+  name: default
+spec:
+  credentials:
+    source: Secret
+    secretRef:
+      namespace: crossplane-system
+      name: civo-credentials
+      key: creds

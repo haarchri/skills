@@ -1,0 +1,8 @@
+# The front door for requests. No auth set, so it authenticates nobody;
+# use it for a smoke test only.
+apiVersion: modelplane.ai/v1alpha1
+kind: InferenceGateway
+metadata:
+  name: public
+spec:
+  clusterName: civo-nyc1

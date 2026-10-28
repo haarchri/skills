@@ -1,0 +1,49 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ml-team
+---
+# A 0.5B model fits any GPU with 20Gi or more. The selector matches the
+# capacity the InferenceClass declares, so this lands on the L40S pool.
+apiVersion: modelplane.ai/v1alpha1
+kind: ModelDeployment
+metadata:
+  name: qwen-demo
+  namespace: ml-team
+spec:
+  replicas: 1
+  template:
+    spec:
+      engines:
+      - name: qwen
+        members:
+        - role: Standalone
+          nodeSelector:
+            devices:
+            - name: gpu
+              count: 1
+              selectors:
+              - cel: |
+                  device.capacity["gpu.nvidia.com"].memory.compareTo(quantity("20Gi")) >= 0
+          template:
+            spec:
+              containers:
+              - name: engine
+                image: vllm/vllm-openai:v0.23.0
+                args:
+                - --model=Qwen/Qwen2.5-0.5B-Instruct
+                - --served-model-name=$(MODELPLANE_SERVED_MODEL_NAME)
+                - --dtype=half
+---
+# Publishes the deployment as the model ml-team/qwen.
+apiVersion: modelplane.ai/v1alpha1
+kind: ModelService
+metadata:
+  name: qwen
+  namespace: ml-team
+spec:
+  endpoints:
+  - name: qwen-demo
+    selector:
+      matchLabels:
+        modelplane.ai/deployment: qwen-demo
