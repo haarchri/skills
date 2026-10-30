@@ -12,7 +12,7 @@ Modelplane decisions those are, so the two don't read as contradictory.
 |---|---|
 | Test first, and RED must fail for the intended reason (charter §3, author-composition rule 3) | Phase 2 and 3 "Test first" |
 | Claim only what ran; name the layer reached (charter §4, §8; rule 5) | Phase 5 |
-| Check every composed Kind against provider and cloud rules, report the result (charter §6) | Phase 0 item 10, end of Phase 2 |
+| Check every composed Kind against provider and cloud rules, report the result (charter §6) | Phase 0 item 12, end of Phase 2 |
 | Never create cloud infrastructure as a side effect (charter §9; rule 2) | Phase 5 layer 3: the user runs the cloud test |
 | References (selectors) before status plumbing (author-composition Phase 3.3) | Phase 2 `fn.py`, dependents gating |
 | Composition keys are permanent; a rename is a migration (Phase 3.2) | Phase 2 `fn.py` |

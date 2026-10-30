@@ -36,12 +36,20 @@ depends on across the join. Every half carries, by component key:
 | `node-feature-discovery` | unless the cloud runs NFD itself | worker tolerates `nvidia.com/gpu` (`operator: Exists`). Without it: no `pci-10de` label, no kubelet plugin, no ResourceSlices, every claim unallocatable while everything looks healthy. Vultr omits it because its managed operator runs NFD and a second one would race it |
 | `gpu-operator` | only when the node image has no driver and the cloud has no managed operator | driver on, toolkit off if the image has it, device plugin off, NFD off (standalone above), DaemonSets tolerate the GPU taint, `wait=True`, `depends_on` NFD and cert-manager. Driver pin mirrors the generated halves |
 | `nvidia-dra-driver-gpu` | always | namespace `nvidia-dra-driver` (common.py's quota targets it), release `mp-dra-driver-nvidia-gpu`, `gpuResourcesEnabledOverride: true`, compute domains off. `nvidiaDriverRoot`: default `/` when the image has the driver; `/run/nvidia/driver` when the operator installs it, plus `depends_on: [gpu-operator]` |
+| `dcgm-exporter` | when neither the cloud nor an installed GPU operator supplies one | NVIDIA's standalone chart, as `upcloud.py` has it: the shared `DCGM_METRICS_CSV` in `customMetrics` (unset, the chart's shorter default silently exports fewer fields than every other cloud), `kubernetesDRA.enabled: true` so series attribute to DRA-allocated pods, the GPU taint toleration, affinity = the DRA kubelet plugin's PCI `nodeSelectorTerms`, `serviceMonitor` off (the collector finds the pod itself) |
+
+GPU-only charts — NFD, the DRA driver, the DCGM exporter — carry
+`dra_drivers=["gpu.nvidia.com"]` so they stay off clusters whose classes
+claim no GPUs, and the half declares `EXTERNAL_DRIVERS` (DRA drivers that
+arrive outside the stack; usually `[]`). `stacks/__init__.py`'s
+supported-drivers table folds `EXTERNAL_DRIVERS` into what the chart tags
+derive.
 
 ## Decide from the cloud's GPU stack
 
 | Node image / cloud | Half looks like | Cluster function does |
 |---|---|---|
-| driver in image, no operator | Nebius: NFD + DRA driver | taints GPU pools |
+| driver in image, no operator | Nebius, UpCloud: NFD + DRA driver (+ standalone dcgm-exporter on UpCloud) | taints GPU pools |
 | managed GPU Operator add-on | Vultr: no NFD, DRA driver at `/` | labels GPU pools `nvidia.com/gpu.deploy.device-plugin=false`; gates readiness on an observe-only Object of the operator's validator |
 | no driver, no operator | Civo: NFD + gpu-operator (driver) + DRA driver at `/run/nvidia/driver` | no GPU readiness gate: the operator arrives after the cluster XR is Ready, so a gate would deadlock |
 
@@ -66,12 +74,19 @@ same devices (device plugin and DRA) is the bug to avoid.
   rely on it. Where your half installs the GPU operator, enable `dcgm` and
   `dcgmExporter` with the shared metrics CSV from
   `generated/aicr/dcgm.py` (`DCGM_METRICS_CSV`) and keep its ServiceMonitor
-  off, as `civo.py` does. Without an exporter the GPU series are empty on that
-  cloud; state it if so.
+  off, as `civo.py` does. Where neither exists, install the standalone
+  `dcgm-exporter` chart (table above), as `upcloud.py` does. Empty GPU series
+  are not an acceptable default; Nebius's gap predates the standalone chart.
 - **Load balancer.** `common.py` pins the gateway Service to
   `externalTrafficPolicy: Cluster` because some clouds reject `Local`. If the
-  new cloud needs LB annotations to get an external address, that's a
-  `common.py`/gateway change with its own discussion, not a cloud-half edit.
+  cloud's controller needs Service annotations — UpCloud needs an explicit LB
+  name (its default truncates to a colliding prefix) and `frontends` in TCP
+  mode (its HTTP default resets the gateway's TLS) — don't edit `common.py`:
+  compose-inference-cluster projects them through the ServingStack's
+  `spec.gateway.serviceAnnotations`, and `gateway.py` composes a per-gateway
+  EnvoyProxy (`gateway-lb-proxy`) that carries them with `{gateway}` replaced
+  by the Gateway's name. That EnvoyProxy replaces (not merges with) the
+  GatewayClass-level one, so it restates the `externalTrafficPolicy` pin.
   Check that the gateway gets an address in the user's e2e run.
 - **Fabric drivers aren't stack components.** The NVIDIA network operator
   (AKS InfiniBand) and the EFA DRA driver (EKS) are composed by the cluster
@@ -84,7 +99,8 @@ same devices (device plugin and DRA) is the bug to avoid.
 ## Files touched
 
 - `functions/compose-serving-stack/function/stacks/clouds/<cloud>.py` (new)
-- `functions/compose-serving-stack/function/stacks/__init__.py` (import, `_CLOUDS`)
+- `functions/compose-serving-stack/function/stacks/__init__.py` (import,
+  `_CLOUDS`, the supported-drivers table)
 - `functions/compose-serving-stack/function/stacks/components.py` (`Cloud` Literal)
 - `apis/servingstacks/definition.yaml` (`spec.cloud` enum)
 - `functions/compose-inference-cluster/function/fn.py` (its `Cloud` Literal
@@ -92,8 +108,11 @@ same devices (device plugin and DRA) is the bug to avoid.
 - `functions/compose-serving-stack/tests/test_fn.py`: `<Cloud>Standard` and
   `<Cloud>Dynamo` in `COMPOSED_RESOURCE_KEYS_CASES` (the key set is the
   identity contract) and per-cloud cases for anything cloud-specific
-- `tests/test_stacks.py`: nothing for the invariants (parametrized over
-  `stacks.clouds()`); a case table only if you add a transform
+- `tests/test_stacks.py`: the invariants are parametrized over
+  `stacks.clouds()`; add a `SupportedDriversCase`, literal assertions for
+  hand-pinned values (UpCloud pins the exporter's CSV, affinity terms and
+  `kubernetesDRA` as literals so a drive-by change fails in review), and a
+  case table only if you add a transform
 - `e2e/clouds/__init__.py` (the leg), `e2e/test_legs.py` (`COMPOSITIONS`,
   unless the cloud taints GPU nodes itself like GKE),
   `.github/workflows/e2e-clouds.yml` (matrix)

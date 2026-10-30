@@ -12,7 +12,14 @@ Check each before opening the PR.
 - [ ] Default Kubernetes version is the newest the cloud offers, or left
       unset when the cloud needs exact build strings.
 - [ ] CEL rules: `source`/`provider` discriminator requires the block; GPU
-      role requires `gpu`; `minNodeCount` requires `maxNodeCount`.
+      role requires `gpu`; `minNodeCount` requires `maxNodeCount`; pool
+      `name != 'system'` (both the InferenceCluster and the `<Cloud>Cluster`
+      XRD — `system` is the injected system pool); the class's `accelerator`
+      is required when a device claims a non-`dra.cpu` DRA driver and
+      forbidden when none does.
+- [ ] `diskSizeGb` on the pool and the class block when the cloud unbundles
+      disks from the plan, and the default disk fits an inference serving
+      image.
 - [ ] Breaking changes to shared types (e.g. `fabric` changing from a
       string to an object) are called out in the PR.
 
@@ -29,12 +36,27 @@ Check each before opening the PR.
       detail falls back to a default.
 - [ ] Every composed Kind checked against the provider models' conditional
       rules and the cloud's API rules; the result is in the report.
-- [ ] In-cluster resources are orphan-managed (no `Delete`).
+- [ ] In-cluster resources are orphan-managed (no `Delete`), and an observed
+      orphan-managed release survives removal of the spec that asked for it
+      (the cluster-autoscaler stays composed with an empty group list when
+      `spec.autoscaler` goes away, or the orphan fights Crossplane's
+      `nodeCount`).
 - [ ] Autoscaled pools don't late-initialize `nodeCount`.
 - [ ] GPU pools carry `modelplane.ai/pool` and the GPU taint the serving
       stack tolerates (unless the cloud adds it itself, like GKE); the DRA
       driver is the only GPU allocator (device plugin disabled or labelled
-      off).
+      off). CPU pools carry the `modelplane.ai/cpu` label and taint.
+- [ ] A pool's role comes from the class's `accelerator` presence
+      (GPU vs CPU) in `compose_<cloud>_cluster()`, and the cloud is in
+      compose-inference-cluster's `_SUPPORTED` drivers map.
+- [ ] Optional status fields are assigned only when observed (an explicit
+      `None` is a null tombstone under `exclude_unset`); identifiers other
+      functions need (e.g. a cluster UUID for LB names) are published on the
+      cluster XR's status.
+- [ ] If the cloud's LBs need Service annotations (naming, TCP mode), the
+      `<cloud>_gateway_service_annotations()` helper sets them on the
+      ServingStack spec and the InferenceCluster status, published before
+      the gateway address exists.
 - [ ] Activation tuple lists every MR CRD the function composes.
 
 ## Optional capabilities
@@ -50,8 +72,19 @@ Check each before opening the PR.
 - [ ] NFD worker tolerates the GPU taint (or the cloud's own NFD is relied on, never two).
 - [ ] `nvidiaDriverRoot` matches where the driver lives; DRA driver `depends_on` the operator when the half installs it.
 - [ ] Release names `mp-<chart>`, keys stable, shared pins mirrored from the other halves.
-- [ ] A DCGM exporter runs on GPU nodes (the cloud's, or the operator's with the shared CSV and no ServiceMonitor), or the gap is stated.
-- [ ] e2e leg added (`e2e/clouds/__init__.py`, `e2e/test_legs.py`, `e2e-clouds.yml` matrix) and `nix run .#e2e -- --cloud <cloud>` passes.
+- [ ] A DCGM exporter runs on GPU nodes: the cloud's, the operator's with
+      the shared CSV and no ServiceMonitor, or the standalone chart (shared
+      CSV in `customMetrics`, `kubernetesDRA` on, GPU-taint toleration, the
+      DRA kubelet plugin's affinity terms). Empty `modelplane_gpu_*` series
+      are not an acceptable default.
+- [ ] GPU-only charts tagged `dra_drivers=["gpu.nvidia.com"]`, the half
+      declares `EXTERNAL_DRIVERS`, the cloud is in the supported-drivers
+      table, and `test_stacks.py` has a `SupportedDriversCase` plus literal
+      assertions for hand-pinned values.
+- [ ] e2e leg added (`e2e/clouds/__init__.py` with `cpu_labels` and
+      `dra_drivers`, `e2e/test_legs.py`, `e2e-clouds.yml` matrix, the
+      `--cloud` list in `e2e/README.md`) and `nix run .#e2e -- --cloud
+      <cloud>` passes. Fake-node OS release labels copied from a live node.
 - [ ] `<Cloud>Standard`/`<Cloud>Dynamo` key-set cases added.
 
 ## Docs
@@ -71,6 +104,9 @@ Check each before opening the PR.
       `feat:` prefixes, bodies lead with the problem, signed off.
 - [ ] Review fixes folded into their commits, not left as
       "address review comments".
+- [ ] Rebased onto current main, and the Phase 3 `git grep` parity sweep
+      re-run after the rebase — platform PRs merging mid-review (CPU pools,
+      new common components) widen what the new cloud must cover.
 - [ ] Each new test case was seen failing for the intended reason before
       the code that makes it pass.
 - [ ] `nix run .#fix` and `nix flake check` pass, and the report names the

@@ -37,9 +37,11 @@ copy from the function that made the same choice:
 | Kubeconfig auth | the kubeconfig alone (AKS, Vultr, Civo client certs; EKS via ClusterAuth) / identity layered on the ProviderConfig (GKE, Nebius) |
 | Dependents gating | one pass, children reference the cluster by selector (AKS, EKS, GKE, Nebius) / gated on cluster `Ready` with `_dependents_observed()` because they need an observed ID (Vultr, Civo) |
 | Autoscaling | server-side per pool (AKS, GKE, Nebius) / in-cluster cluster-autoscaler release (EKS, Civo) / fixed pools |
-| GPU stack | generated from AICR (EKS, AKS, GKE) / hand-written half: driver in image (Nebius), managed GPU Operator add-on (Vultr), nothing pre-installed (Civo) |
-| ModelCache RWX | managed FS + `modelplane-rwx-fs` StorageClass (EKS EFS, GKE Filestore, AKS Azure Files, Nebius shared FS) / none (Vultr, Civo) |
-| Fabric | EFA (EKS), InfiniBand (AKS, Nebius) / none (GKE, Vultr, Civo) |
+| GPU stack | generated from AICR (EKS, AKS, GKE) / hand-written half: driver in image (Nebius, UpCloud), managed GPU Operator add-on (Vultr), nothing pre-installed (Civo) |
+| GPU metrics | DCGM exporter from the GPU operator (EKS, AKS, GKE, Civo) or the managed add-on (Vultr) / standalone `dcgm-exporter` chart when the driver is in the image (UpCloud) / gap stated (Nebius, which predates the standalone chart) |
+| ModelCache RWX | managed FS + `modelplane-rwx-fs` StorageClass (EKS EFS, GKE Filestore, AKS Azure Files, Nebius shared FS) / none (Vultr, Civo, UpCloud) |
+| Fabric | EFA (EKS), InfiniBand (AKS, Nebius) / none (GKE, Vultr, Civo, UpCloud) |
+| Gateway LB | a plain LoadBalancer Service (most) / Service annotations through `spec.gateway.serviceAnnotations` because the cloud controller needs an explicit LB name or TCP mode (UpCloud) |
 
 ## Phase 0: Facts before code
 
@@ -62,9 +64,23 @@ wrong guess would change the API.
 7. **ModelCache RWX.** A managed ReadWriteMany filesystem usable from GPU nodes?
    If not, ModelCache is left out (see "Optional capabilities").
 8. **Fabric.** InfiniBand/RDMA or EFA-like? If not, not mapped.
-9. **Versions and sizes.** Newest Kubernetes version (DRA needs 1.34+); GPU
-   sizes and regions for examples.
-10. **Provider and cloud constraints.** Name length and charset, create-only
+9. **Versions and sizes.** Newest Kubernetes version (DRA needs 1.34+; CPU
+   pools claim cores as consumable capacity, on by default from 1.36,
+   DRAConsumableCapacity); GPU sizes, a CPU plan for CPU pools, and regions
+   for examples.
+10. **Node disks.** Is the boot disk bundled with the plan or unbundled from
+    it, and is the default big enough for an inference serving image? UKS's
+    default GPU plan disk wasn't, and a full disk evicts every pod on
+    ephemeral-storage pressure. Unbundled → a `diskSizeGb` pool field mapped
+    to the plan's storage block, with the cloud's SSD tier.
+11. **Load balancers.** How the cloud controller names a LoadBalancer
+    Service's LB — UpCloud truncates `<cluster UUID><namespace><name>` to 64
+    chars with no unique suffix, so Modelplane's same-prefixed gateway
+    Services collide — and whether its frontends pass TLS through (UpCloud
+    hardcodes HTTP mode, which resets the gateway's TLS handshake; it needs
+    TCP). Both are fixed with Service annotations through
+    `spec.gateway.serviceAnnotations` (Phase 3).
+12. **Provider and cloud constraints.** Name length and charset, create-only
     fields, conditional rules in the generated models' docstrings
     (`Required if …`, `Conflicts with …`). Record what you checked; "checked,
     found nothing" is a result.
@@ -103,10 +119,15 @@ values (CNI, system pool, chart pins, add-on removal) are constants in `fn.py`.
 Every extra field is API you support forever. The usual spec: `region`,
 optional `kubernetesVersion` (default the newest, or unset when the cloud wants
 exact build strings), `credentials` (`ProviderConfig|ClusterProviderConfig`,
-default `ClusterProviderConfig/default`), `nodePools[]` with `role`, size,
-`nodeCount`, optional `minNodeCount`/`maxNodeCount`, `gpu` required for GPU
-pools via CEL. Status: `secrets[]` (`type: Kubeconfig`), plus `cache` only if
-the cloud has RWX storage.
+default `ClusterProviderConfig/default`), `nodePools[]` with `role`
+(`System`, `GPU`, `CPU`), size, `nodeCount`, optional
+`minNodeCount`/`maxNodeCount`, `diskSizeGb` when the cloud unbundles disks
+from the plan, `gpu` required for GPU pools via CEL, and `name != 'system'`
+via CEL — `system` is the injected system pool's name on every provisioned
+cluster (the same rule guards InferenceCluster's `nodePools`). Status:
+`secrets[]` (`type: Kubeconfig`), `cache` only if the cloud has RWX storage,
+plus whatever observed identifiers Phase 0 item 11 needs (UpCloud publishes
+`status.clusterId` for account-unique LB names).
 
 **Test first.** Write the case table before `fn.py` and watch `nix run .#test
 -- compose-<cloud>-cluster` fail for the reason you intend (missing resource,
@@ -116,8 +137,9 @@ it passes. Follow CONTRIBUTING's Tests section exactly;
 prefix here. Cover every input shape and observed-state branch your function
 has: always `FirstPass` and `CustomCredentials`, a ready state
 (`ResourcesReady` or `ClusterReady`), and one case per branch you add (Ready
-regression if you gate, fixed vs autoscaled pool, observed IDs, GPU observer,
-cache, fabric, credential fallback).
+regression if you gate, fixed vs autoscaled pool, a CPU pool, the autoscaler
+removed after its release was observed, observed IDs, GPU observer, cache,
+fabric, credential fallback).
 
 **`fn.py`:**
 
@@ -140,12 +162,21 @@ cache, fabric, credential fallback).
   deleted kubeconfig. Autoscaled pools: seed `nodeCount` through
   `initProvider` and leave `LateInitialize` out, or Crossplane fights the
   autoscaler.
+- Orphan-managed also means removal from the spec can't just drop the
+  resource from desired state: once the cluster-autoscaler release is
+  observed, keep composing it even after `spec.autoscaler` is gone —
+  neutralized (empty node group list renders no Deployment) — or the orphaned
+  autoscaler keeps scaling its old groups against the `nodeCount` Crossplane
+  now enforces on the fixed pools.
 - GPU pools carry `modelplane.ai/pool` and the GPU taint the serving stack
   tolerates (the functions use `nvidia.com/gpu=true:NoSchedule`; check whether
   the cloud adds one itself, as GKE does). The DRA driver is the only GPU
-  allocator.
+  allocator. CPU pools carry `modelplane.ai/pool` plus the `modelplane.ai/cpu`
+  label (dra-driver-cpu selects its nodes by it) and taint.
+- Optional status fields are assigned only when observed; an explicit `None`
+  serializes as a null tombstone under `exclude_unset`.
 - Implicit fallbacks emit `response.warning`.
-- Before finishing, check every Kind you compose against Phase 0 item 10.
+- Before finishing, check every Kind you compose against Phase 0 item 12.
 
 Commit: imperative subject, no `feat:` prefix, body leading with the problem,
 `-s`. Example: `Add CivoCluster to provision Civo Kubernetes clusters`.
@@ -162,15 +193,21 @@ Every provisioned source has one; without it users can only set credentials
 by creating the `<Cloud>Cluster` XR directly.
 
 **`apis/inferenceclasses/definition.yaml`**: `<Cloud>` in
-`spec.provisioning.provider`, the matching CEL rule, and a `<cloud>` block (size
-or machine type, `accelerator {type, count}` described as provisioning input
-only; the scheduler matches `spec.devices`).
+`spec.provisioning.provider`, the matching CEL rule, and a `<cloud>` block:
+size or machine type, `diskSizeGb` when the cloud unbundles disks, and
+optional `accelerator {type, count}` described as provisioning input only
+(the scheduler matches `spec.devices`). Whether `accelerator` is set decides
+whether the pool is provisioned GPU or CPU, so copy the paired CEL rules
+every cloud has: `accelerator` required when a device claims a DRA driver
+other than `dra.cpu`, and forbidden when none does.
 
 **`apis/servingstacks/definition.yaml`**: `<Cloud>` in `spec.cloud`.
 
 **`functions/compose-inference-cluster/function/fn.py`**:
 
-- Import the model, extend the `Cloud` Literal, add `CLUSTER_SOURCE_<CLOUD>`.
+- Import the model, extend the `Cloud` Literal, add `CLUSTER_SOURCE_<CLOUD>`,
+  and the cloud's entry in the `_SUPPORTED` drivers map (usually
+  `{"gpu.nvidia.com", "dra.cpu"}`).
 - `_ACTIVATE_<CLOUD>`: every MR CRD the cluster function composes (the
   per-cloud activation policy; `apis/mrap.yaml` is not touched).
 - Dispatch branch and `compose_<cloud>()`: activation gate →
@@ -178,9 +215,21 @@ only; the scheduler matches `spec.devices`).
   secret (plus identity if the kubeconfig lacks client certs) → ServingStack →
   Usage blocking cluster deletion until the ServingStack is gone → status and
   conditions.
-- `compose_<cloud>_cluster()` maps each pool's class provisioning block; a
+- `compose_<cloud>_cluster()` maps each pool's class provisioning block; the
+  class's `accelerator` presence decides the pool's role (`GPU` vs `CPU`); a
   missing block sets `ClusterReady=False`/`InvalidNodePool` and warns.
   Autoscaling bounds only when set; no fabric → say so in a comment.
+- If Phase 0 item 11 found the cloud's LBs need annotations: a
+  `<cloud>_gateway_service_annotations()` helper builds them from the cluster
+  XR's observed status (UpCloud: `{"name": "<clusterId>-{gateway}",
+  "frontends": [{"mode": "tcp"}]}` in the LB config annotation), set on both
+  the ServingStack's `spec.gateway.serviceAnnotations` and the
+  InferenceCluster's `status.gateway.serviceAnnotations` — published
+  independently of, and before, the gateway address, so
+  compose-inference-gateway has them before any Service exists. Downstream
+  (compose-serving-stack's per-gateway EnvoyProxy, compose-inference-gateway)
+  replaces `{gateway}` with each Gateway's name; that plumbing already
+  exists, you only write the helper.
 - Secret helpers (`resolve_…_backend_secrets`, `observed_…_secrets`,
   `observed_…_secret`).
 - Cache: see "Optional capabilities".
@@ -193,23 +242,38 @@ with `common.py` and the stack file (`standard.py` / `dynamo.py`). You don't
 touch those, the generator, or `generated/aicr/` (EKS, AKS, GKE only). The
 half supplies the hardware surface the stack contract needs: cert-manager,
 kube-prometheus-stack, NFD unless the cloud runs one, the GPU Operator only
-if the cloud doesn't provide a driver, and `nvidia-dra-driver-gpu` with the
-right `nvidiaDriverRoot`. Then:
+if the cloud doesn't provide a driver, `nvidia-dra-driver-gpu` with the
+right `nvidiaDriverRoot`, and a DCGM exporter — the operator's or the cloud's
+where one exists, else the standalone `dcgm-exporter` chart as `upcloud.py`
+has it (the shared `DCGM_METRICS_CSV` in `customMetrics`, `kubernetesDRA`
+enabled so series attribute to DRA-allocated pods, the GPU taint toleration,
+the DRA kubelet plugin's PCI affinity terms, no ServiceMonitor). Empty
+`modelplane_gpu_*` series is not an acceptable default; Nebius's gap predates
+the standalone chart. GPU-only charts (NFD, the DRA driver, the exporter)
+carry `dra_drivers=["gpu.nvidia.com"]` so they stay off clusters whose
+classes claim no GPUs, and the half declares `EXTERNAL_DRIVERS` (drivers
+arriving outside the stack, usually empty). Then:
 
 - `stacks/components.py`: extend the `Cloud` Literal.
-- `stacks/__init__.py`: import the module, add it to `_CLOUDS`.
+- `stacks/__init__.py`: import the module, add it to `_CLOUDS` and the
+  supported-drivers table (it folds in `EXTERNAL_DRIVERS`).
 - `apis/servingstacks/definition.yaml`: `<Cloud>` in `spec.cloud`.
 - `fn.py`: no cloud branch unless the cluster projects per-cluster state into
   the ServingStack (Civo's `spec.gpu` NVLink pools). Add that only with a
   field on the ServingStack XRD and a transform in the cloud's module.
 - Tests: the parametrized invariants in `tests/test_stacks.py` pick the cloud
-  up through `stacks.clouds()` automatically; add `<Cloud>Standard` and
-  `<Cloud>Dynamo` to `COMPOSED_RESOURCE_KEYS_CASES` and the per-cloud cases
-  in `tests/test_fn.py`.
+  up through `stacks.clouds()` automatically; add a `SupportedDriversCase`
+  there, plus literal cases for anything the half pins by hand (UpCloud
+  asserts the exporter's CSV, affinity terms and `kubernetesDRA` as
+  literals, so a drive-by change fails in review rather than on a cluster),
+  and `<Cloud>Standard`/`<Cloud>Dynamo` in `COMPOSED_RESOURCE_KEYS_CASES`
+  and the per-cloud cases in `tests/test_fn.py`.
 - **e2e leg.** Add the cloud to `e2e/clouds/__init__.py` `CLOUDS`: the fake
   GPU nodes' labels (what the cluster function stamps, plus the NFD and OS
-  release labels the GPU operator reads), the GPU taint value, and the
-  DaemonSets that must fan out to the GPU pool. Add the cloud to
+  release labels the GPU operator reads — take the OS release values from a
+  live node of the cloud, not a guess), `cpu_labels` and `dra_drivers` for
+  the CPU pool, the GPU taint value, and the DaemonSets that must fan out to
+  the device pools (including the DCGM exporter's). Add the cloud to
   `COMPOSITIONS` in `e2e/test_legs.py` (pins the leg's taint to the
   function's `_GPU_TAINT*` constants) and to the matrix in
   `.github/workflows/e2e-clouds.yml`. Run `nix run .#e2e -- --cloud <cloud>`:
@@ -219,8 +283,8 @@ right `nvidiaDriverRoot`. Then:
 
 **Tests**, test first as in Phase 2: in `compose-inference-cluster` the table
 covers every cloud, so prefix names with the new one: `<Cloud>FirstPass`,
-`<Cloud>Credentials`, `<Cloud>Ready`. In `compose-serving-stack`:
-`<Cloud>Standard` and `<Cloud>Dynamo`.
+`<Cloud>Credentials`, `<Cloud>Ready`, `<Cloud>CPUPool`. In
+`compose-serving-stack`: `<Cloud>Standard` and `<Cloud>Dynamo`.
 
 Then `nix run .#build`, `nix run .#fix`, `nix flake check`. Example commit:
 `Provision InferenceClusters on Civo`.
@@ -302,7 +366,10 @@ mapped, and no XRD field.
 
 **Autoscaler.** Server-side → the pool's autoscaling fields. None → the
 upstream cluster-autoscaler Helm release if it supports the cloud,
-orphan-managed. Neither → fixed pools, stated in the docstring and docs.
+orphan-managed — which means a removed `spec.autoscaler` keeps the observed
+release composed with an empty group list rather than dropping it (see the
+fn.py rules in Phase 2). Neither → fixed pools, stated in the docstring and
+docs.
 
 **GPU readiness gate.** Only when the cloud pre-installs the GPU operator.
 
@@ -334,6 +401,12 @@ fabric, credentials). Breaking changes stated plainly. End-to-end validation
 only if the user ran it; never invent results. No hard-wrapped body.
 
 Before handing off, go through [review-checklist.md](references/review-checklist.md).
+
+Main moves while the PR is open. After every rebase, re-run the Phase 3
+`git grep` parity sweep over the newest existing cloud: UpCloud had to
+retrofit CPU pools, `dra_drivers` chart tags and a new common component when
+a platform PR merged mid-review. A branch that merely still compiles after a
+rebase is not yet at parity.
 
 Fold review fixes into the commit they belong to and force-push. No "address
 review comments" commits, no `feat(...)` prefixes.
